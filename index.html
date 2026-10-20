@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Шахматы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);
+  --text:var(--tg-theme-text-color,#111);
+  --hint:var(--tg-theme-hint-color,#777);
+  --btn:var(--tg-theme-button-color,#2481cc);
+  --btntext:var(--tg-theme-button-text-color,#fff);
+  --sec:var(--tg-theme-secondary-bg-color,#f1f1f1);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+.wrap{max-width:560px;margin:0 auto;padding:10px;display:flex;flex-direction:column;gap:10px}
+.status{text-align:center;font-size:17px;font-weight:600;min-height:24px}
+.board{display:grid;grid-template-columns:repeat(8,1fr);width:min(100%,64vh);aspect-ratio:1;margin:0 auto;touch-action:none;user-select:none;-webkit-user-select:none;border-radius:6px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.sq{position:relative;display:flex;align-items:center;justify-content:center}
+.sq.l{background-color:#f0d9b5;color:#b58863}
+.sq.d{background-color:#b58863;color:#f0d9b5}
+.sq.last{box-shadow:inset 0 0 0 100px rgba(255,235,59,.35)}
+.sq.sel{box-shadow:inset 0 0 0 100px rgba(30,150,255,.45)}
+.sq.check{background-image:radial-gradient(circle,#ff3b3b 25%,transparent 75%)}
+.sq[data-r]::before{content:attr(data-r);position:absolute;top:2px;left:3px;font-size:10px;font-weight:700;opacity:.8}
+.sq[data-f]::after{content:attr(data-f);position:absolute;bottom:1px;right:3px;font-size:10px;font-weight:700;opacity:.8}
+.dot{position:absolute;width:28%;height:28%;border-radius:50%;background:rgba(0,0,0,.25);pointer-events:none}
+.dot.cap{width:92%;height:92%;background:transparent;border:5px solid rgba(0,0,0,.25)}
+.pc{font-size:calc(var(--sq,40px)*.82);line-height:1;pointer-events:none}
+.pc.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,0 1px 3px #000}
+.pc.b{color:#1b1b1b;text-shadow:0 0 1px #fff,0 0 1px #fff}
+.ghost{position:fixed;transform:translate(-50%,-60%);pointer-events:none;z-index:100;line-height:1}
+.row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+select,button{font:inherit;font-size:15px;padding:9px 12px;border-radius:10px;border:0;background:var(--sec);color:var(--text)}
+button{background:var(--btn);color:var(--btntext);font-weight:600}
+button.sec{background:var(--sec);color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="status" id="status"></div>
+  <div class="board" id="board"></div>
+  <div class="row">
+    <select id="mode">
+      <option value="ai">Против компьютера</option>
+      <option value="two">Вдвоём на одном телефоне</option>
+    </select>
+    <select id="level">
+      <option value="0">Лёгкий</option>
+      <option value="1" selected>Средний</option>
+      <option value="2">Сложный</option>
+    </select>
+    <select id="side">
+      <option value="w">Белыми</option>
+      <option value="b">Чёрными</option>
+    </select>
+  </div>
+  <div class="row">
+    <button id="new">Новая партия</button>
+    <button id="undo" class="sec">Отменить ход</button>
+    <button id="flip" class="sec">Повернуть доску</button>
+  </div>
+</div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const game = new Chess();
+const GLYPH = {k:'♚\uFE0E', q:'♛\uFE0E', r:'♜\uFE0E', b:'♝\uFE0E', n:'♞\uFE0E', p:'♟\uFE0E'};
+const VAL = {p:100, n:320, b:330, r:500, q:900, k:0};
+
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('status');
+const modeEl = document.getElementById('mode');
+const levelEl = document.getElementById('level');
+const sideEl = document.getElementById('side');
+
+let selected = null, legal = [], last = null;
+let flipped = false, thinking = false, dragging = null;
+
+const mode = () => modeEl.value;
+const humanColor = () => sideEl.value;
+const humanTurn = () => mode() === 'two' || game.turn() === humanColor();
+function haptic(){ try { tg.HapticFeedback.impactOccurred('light'); } catch (e) {} }
+
+/* ---------- отрисовка ---------- */
+function kingSquare(color){
+  const b = game.board();
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const p = b[r][c];
+    if (p && p.type === 'k' && p.color === color) return 'abcdefgh'[c] + (8 - r);
+  }
+}
+
+function render(){
+  boardEl.style.setProperty('--sq', boardEl.clientWidth / 8 + 'px');
+  boardEl.innerHTML = '';
+  const b = game.board();
+  const checkSq = game.in_check() ? kingSquare(game.turn()) : null;
+  for (let i = 0; i < 64; i++) {
+    const r = i >> 3, c = i & 7;
+    const rank = flipped ? r + 1 : 8 - r;
+    const file = flipped ? 7 - c : c;
+    const name = 'abcdefgh'[file] + rank;
+    const piece = b[8 - rank][file];
+
+    const sq = document.createElement('div');
+    sq.className = 'sq ' + ((file + rank) % 2 === 1 ? 'd' : 'l');
+    sq.dataset.sq = name;
+    if (c === 0) sq.dataset.r = rank;
+    if (r === 7) sq.dataset.f = 'abcdefgh'[file];
+    if (last && (last[0] === name || last[1] === name)) sq.classList.add('last');
+    if (selected === name) sq.classList.add('sel');
+    if (checkSq === name) sq.classList.add('check');
+
+    if (piece) {
+      const pc = document.createElement('span');
+      pc.className = 'pc ' + piece.color;
+      pc.textContent = GLYPH[piece.type];
+      sq.appendChild(pc);
+    }
+    if (selected && legal.includes(name)) {
+      const d = document.createElement('span');
+      d.className = 'dot' + (piece ? ' cap' : '');
+      sq.appendChild(d);
+    }
+    boardEl.appendChild(sq);
+  }
+}
+
+function status(){
+  let t;
+  if (game.in_checkmate()) t = 'Мат! Победили ' + (game.turn() === 'w' ? 'чёрные' : 'белые') + '.';
+  else if (game.in_draw()) t = 'Ничья.';
+  else if (thinking) t = 'Компьютер думает…';
+  else {
+    const chk = game.in_check() ? ' — шах!' : '';
+    if (mode() === 'ai') t = (game.turn() === humanColor() ? 'Ваш ход' : 'Ход компьютера') + chk;
+    else t = 'Ход ' + (game.turn() === 'w' ? 'белых' : 'чёрных') + chk;
+  }
+  statusEl.textContent = t;
+}
+
+/* ---------- ввод: нажатие и перетаскивание ---------- */
+boardEl.addEventListener('pointerdown', e => {
+  if (thinking || game.game_over() || !humanTurn()) return;
+  const sqEl = e.target.closest('.sq');
+  if (!sqEl) return;
+  const name = sqEl.dataset.sq;
+
+  if (selected && legal.includes(name)) { tryMove(selected, name); return; }
+
+  const p = game.get(name);
+  if (p && p.color === game.turn()) {
+    selected = name;
+    legal = game.moves({square: name, verbose: true}).map(m => m.to);
+    render();
+    startDrag(e, name, p);
+  } else {
+    selected = null; legal = [];
+    render();
+  }
+});
+
+function startDrag(e, name, p){
+  const orig = boardEl.querySelector('[data-sq="' + name + '"] .pc');
+  if (orig) orig.style.opacity = .3;
+  const g = document.createElement('div');
+  g.className = 'ghost pc ' + p.color;
+  g.textContent = GLYPH[p.type];
+  g.style.fontSize = (boardEl.clientWidth / 8) * 0.95 + 'px';
+  document.body.appendChild(g);
+  dragging = {g, name, moved: false, sx: e.clientX, sy: e.clientY};
+  moveGhost(e);
+}
+function moveGhost(e){
+  dragging.g.style.left = e.clientX + 'px';
+  dragging.g.style.top = e.clientY + 'px';
+  if (Math.abs(e.clientX - dragging.sx) + Math.abs(e.clientY - dragging.sy) > 8) dragging.moved = true;
+}
+function endDrag(e, cancel){
+  if (!dragging) return;
+  const d = dragging; dragging = null;
+  d.g.remove();
+  let to = null;
+  if (!cancel) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const sq = el && el.closest ? el.closest('.sq') : null;
+    to = sq ? sq.dataset.sq : null;
+  }
+  if (d.moved && to && to !== d.name && legal.includes(to)) tryMove(d.name, to);
+  else render();
+}
+addEventListener('pointermove', e => { if (dragging) moveGhost(e); });
+addEventListener('pointerup', e => endDrag(e, false));
+addEventListener('pointercancel', e => endDrag(e, true));
+
+function tryMove(from, to){
+  const m = game.move({from: from, to: to, promotion: 'q'}); // пешка автоматически становится ферзём
+  if (!m) { render(); return; }
+  last = [m.from, m.to];
+  selected = null; legal = [];
+  haptic();
+  render(); status();
+  maybeAI();
+}
+
+/* ---------- простой компьютерный соперник ---------- */
+function order(ms){
+  const score = m => (m.captured ? VAL[m.captured] * 10 - VAL[m.piece] : 0) + (m.promotion ? 800 : 0);
+  return ms.sort((a, b) => score(b) - score(a));
+}
+
+function evalPos(){
+  let s = 0;
+  const b = game.board();
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const p = b[r][c];
+    if (!p) continue;
+    let v = VAL[p.type];
+    if (p.type !== 'k') v += (7 - Math.abs(c - 3.5) - Math.abs(r - 3.5)) * (p.type === 'p' ? 3 : 4);
+    if (p.type === 'p') v += (p.color === 'w' ? 6 - r : r - 1) * 6;
+    s += p.color === 'w' ? v : -v;
+  }
+  return s;
+}
+
+function search(depth, alpha, beta, maxi){
+  const ms = game.moves({verbose: true});
+  if (!ms.length) return game.in_check() ? (game.turn() === 'w' ? -1 : 1) * (99999 + depth) : 0;
+  if (depth === 0) return evalPos();
+  order(ms);
+  if (maxi) {
+    let v = -Infinity;
+    for (const m of ms) {
+      game.move(m);
+      v = Math.max(v, search(depth - 1, alpha, beta, false));
+      game.undo();
+      alpha = Math.max(alpha, v);
+      if (beta <= alpha) break;
+    }
+    return v;
+  }
+  let v = Infinity;
+  for (const m of ms) {
+    game.move(m);
+    v = Math.min(v, search(depth - 1, alpha, beta, true));
+    game.undo();
+    beta = Math.min(beta, v);
+    if (beta <= alpha) break;
+  }
+  return v;
+}
+
+function pickMove(){
+  const lvl = +levelEl.value;
+  const depth = [1, 2, 3][lvl], noise = [90, 15, 0][lvl];
+  const maxi = game.turn() === 'w';
+  const ms = order(game.moves({verbose: true}));
+  let best = null, bs = maxi ? -Infinity : Infinity, alpha = -Infinity, beta = Infinity;
+  for (const m of ms) {
+    game.move(m);
+    const s = search(depth - 1, alpha, beta, !maxi) + (Math.random() - .5) * noise * 2;
+    game.undo();
+    if (maxi ? s > bs : s < bs) { bs = s; best = m; }
+    if (noise === 0) { if (maxi) alpha = Math.max(alpha, s); else beta = Math.min(beta, s); }
+  }
+  return best;
+}
+
+function maybeAI(){
+  if (mode() !== 'ai' || game.game_over() || game.turn() === humanColor()) return;
+  thinking = true; status();
+  setTimeout(() => {
+    const m = pickMove();
+    thinking = false;
+    if (m) { const mv = game.move(m); last = [mv.from, mv.to]; haptic(); }
+    render(); status();
+  }, 80);
+}
+
+/* ---------- кнопки ---------- */
+function newGame(){
+  game.reset();
+  last = null; selected = null; legal = []; thinking = false;
+  flipped = mode() === 'ai' && humanColor() === 'b';
+  render(); status(); maybeAI();
+}
+document.getElementById('new').onclick = newGame;
+modeEl.onchange = sideEl.onchange = newGame;
+document.getElementById('flip').onclick = () => { flipped = !flipped; render(); };
+document.getElementById('undo').onclick = () => {
+  if (thinking) return;
+  game.undo();
+  if (mode() === 'ai' && game.turn() !== humanColor()) game.undo();
+  const h = game.history({verbose: true});
+  last = h.length ? [h[h.length - 1].from, h[h.length - 1].to] : null;
+  selected = null; legal = [];
+  render(); status(); maybeAI();
+};
+addEventListener('resize', render);
+
+newGame();
+</script>
+</body>
+</html>
